@@ -18,46 +18,55 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
 
     steps:
+      # 1️⃣ Checkout your repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2️⃣ Install essential dependencies
       - name: Install dependencies
         run: |
           sudo apt update
           sudo apt -y install build-essential ccache curl git python3 python3-distutils unzip bzip2 xz-utils zlib1g-dev libncurses5-dev libssl-dev libelf-dev
           sudo apt clean
 
+      # 3️⃣ Clone OpenWrt source with retry and buffer
       - name: Clone OpenWrt
         run: |
           git config --global http.postBuffer 524288000
+          git config --global http.maxRequests 100
           git clone --depth=1 https://github.com/openwrt/openwrt.git openwrt || git clone https://github.com/openwrt/openwrt.git openwrt
-          cd openwrt
-          ./scripts/feeds update -a --retry 3
-          ./scripts/feeds install -a
 
-      - name: Enable Helloworld feed
+      # 4️⃣ Enable feeds and helloworld feed
+      - name: Update and install feeds
         run: |
           cd openwrt
           sed -i 's/#src-git helloworld/src-git helloworld/g' ./feeds.conf.default
+          ./scripts/feeds update -a --retry 3
+          ./scripts/feeds install -a
 
+      # 5️⃣ Generate default config
       - name: Generate default config
         run: |
           cd openwrt
           make defconfig
 
+      # 6️⃣ Compile only helloworld package (correct path)
       - name: Compile Helloworld package
         run: |
           cd openwrt
-          make package/helloworld/*/compile V=s
+          # 确认包路径
+          make package/feeds/helloworld/helloworld/compile V=s
 
+      # 7️⃣ Prepare artifact with unique name
       - name: Prepare artifact
         run: |
           cd openwrt
           mkdir -p ../artifact/package
           cp -rf ./bin/packages/x86_64/*/helloworld/*.ipk ../artifact/package/ || true
-          # 自动命名环境变量
+          # 自动生成 artifact 名称
           echo "ARTIFACT_NAME=helloworld-$(date +'%Y%m%d%H%M')-run${GITHUB_RUN_ID}" >> $GITHUB_ENV
 
+      # 8️⃣ Upload artifact
       - name: Upload Helloworld package
         uses: actions/upload-artifact@v4
         with:
