@@ -1,65 +1,65 @@
-name: Build All Helloworld Packages (x86_64)
+# .github/workflows/build-helloworld.yml
+name: Build Helloworld Package
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build_helloworld:
+    name: Build Helloworld x86_64
+    runs-on: ubuntu-22.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
 
     steps:
-      # 1️⃣ Checkout 源码
-      - name: Checkout repo
-        uses: actions/checkout@v3
-        with:
-          submodules: true
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      # 2️⃣ 安装依赖
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y git build-essential libncurses5-dev zlib1g-dev gawk gettext unzip file python3
+          sudo apt -y install build-essential ccache curl git python3 python3-distutils unzip bzip2 xz-utils zlib1g-dev libncurses5-dev libssl-dev libelf-dev
+          sudo apt clean
 
-      # 3️⃣ Clone OpenWrt
-      - name: Clone OpenWrt source
+      - name: Clone OpenWrt
         run: |
-          git clone --depth=1 https://github.com/openwrt/openwrt.git openwrt
+          git config --global http.postBuffer 524288000
+          git clone --depth=1 https://github.com/openwrt/openwrt.git openwrt || git clone https://github.com/openwrt/openwrt.git openwrt
           cd openwrt
-          ./scripts/feeds update -a
+          ./scripts/feeds update -a --retry 3
           ./scripts/feeds install -a
 
-      # 4️⃣ 添加 helloworld
-      - name: Add Helloworld package
-        run: |
-          cd openwrt/package
-          git clone --depth=1 https://github.com/fw876/helloworld.git
-
-      # 5️⃣ 配置所有 helloworld 包
-      - name: Enable all helloworld packages
+      - name: Enable Helloworld feed
         run: |
           cd openwrt
-          # 自动启用所有包为 module
-          for pkg in package/helloworld/*; do
-            if [ -f "$pkg/Makefile" ]; then
-              pkgname=$(basename $pkg)
-              echo "CONFIG_PACKAGE_${pkgname}=m" >> .config
-            fi
-          done
+          sed -i 's/#src-git helloworld/src-git helloworld/g' ./feeds.conf.default
+
+      - name: Generate default config
+        run: |
+          cd openwrt
           make defconfig
 
-      # 6️⃣ 编译所有包（x86_64）
-      - name: Compile all packages
+      - name: Compile Helloworld package
         run: |
           cd openwrt
-          # 编译所有 helloworld 包
-          make -j$(nproc) V=s
+          make package/helloworld/*/compile V=s
 
-      # 7️⃣ 上传 artifacts
-      - name: Upload IPK artifacts
+      - name: Prepare artifact
+        run: |
+          cd openwrt
+          mkdir -p ../artifact/package
+          cp -rf ./bin/packages/x86_64/*/helloworld/*.ipk ../artifact/package/ || true
+          # 自动命名环境变量
+          echo "ARTIFACT_NAME=helloworld-$(date +'%Y%m%d%H%M')-run${GITHUB_RUN_ID}" >> $GITHUB_ENV
+
+      - name: Upload Helloworld package
         uses: actions/upload-artifact@v4
         with:
-          name: helloworld-ipk-${{ github.run_id }}
-          path: |
-            openwrt/bin/packages/x86_64/*/helloworld/*.ipk
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ./artifact/package/
