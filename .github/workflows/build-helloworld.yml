@@ -1,74 +1,115 @@
-# .github/workflows/build-helloworld.yml
-name: Build Helloworld Package
+name: Build OpenWrt Packages
 
 on:
   push:
     branches:
+      - master
       - main
-  workflow_dispatch:
-
-permissions:
-  contents: read
+  workflow_dispatch: # 支持手动触发
+  pull_request:
+    paths-ignore:
+      - '**.md'
 
 jobs:
-  build_helloworld:
-    name: Build Helloworld x86_64
-    runs-on: ubuntu-22.04
-    env:
-      DEBIAN_FRONTEND: noninteractive
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86-64
 
     steps:
-      # 1️⃣ Checkout your repository
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
 
-      # 2️⃣ Install essential dependencies
-      - name: Install dependencies
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine branch name
         run: |
-          sudo apt update
-          sudo apt -y install build-essential ccache curl git python3 python3-distutils unzip bzip2 xz-utils zlib1g-dev libncurses5-dev libssl-dev libelf-dev
-          sudo apt clean
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            BRANCH="${GITHUB_BASE_REF#refs/heads/}"
+          else
+            BRANCH="${GITHUB_REF#refs/heads/}"
+          fi
+          echo "Building for $BRANCH"
+          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
 
-      # 3️⃣ Clone OpenWrt source with retry and buffer
-      - name: Clone OpenWrt
+      # === 新：构建全部插件（可根据需要指定目录） ===
+      - name: Build all packages
+        uses: immortalwrt/gh-action-sdk@v7
+        env:
+          ARCH: ${{ matrix.arch }}
+          FEEDNAME: packages_ci
+          V: s
+          target: ${{ matrix.target }}
+          packages: "" # 空表示全部 feed 下插件
+
+      - name: Move created packages to release dir
         run: |
-          git config --global http.postBuffer 524288000
-          git config --global http.maxRequests 100
-          git clone --depth=1 https://github.com/openwrt/openwrt.git openwrt || git clone https://github.com/openwrt/openwrt.git openwrt
+          mkdir -p release/${{ matrix.arch }}
+          find bin/packages/${{ matrix.arch }}/packages_ci -name "*.ipk" -exec cp {} release/${{ matrix.arch }}/ \; || true
 
-      # 4️⃣ Enable feeds and helloworld feed
-      - name: Update and install feeds
+      - name: Collect metadata
         run: |
-          cd openwrt
-          sed -i 's/#src-git helloworld/src-git helloworld/g' ./feeds.conf.default
-          ./scripts/feeds update -a --retry 3
-          ./scripts/feeds install -a
+          MERGE_ID=$(git rev-parse --short HEAD)
+          
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            BASE_ID=$(git rev-parse --short origin/$BRANCH)
+            HEAD_ID=$(git rev-parse --short HEAD)
+            PRNUMBER=${GITHUB_REF_NAME%/merge}
+          else
+            BASE_ID=$(git rev-parse --short HEAD^)
+            HEAD_ID=$MERGE_ID
+            PRNUMBER="push-$MERGE_ID"
+          fi
+          
+          echo "MERGE_ID=$MERGE_ID" >> $GITHUB_ENV
+          echo "BASE_ID=$BASE_ID" >> $GITHUB_ENV
+          echo "HEAD_ID=$HEAD_ID" >> $GITHUB_ENV
+          echo "PRNUMBER=$PRNUMBER" >> $GITHUB_ENV
+          echo "ARCHIVE_NAME=${{ matrix.arch }}-$PRNUMBER" >> $GITHUB_ENV
 
-      # 5️⃣ Generate default config
-      - name: Generate default config
+      - name: Generate metadata
         run: |
-          cd openwrt
-          make defconfig
+          shopt -s nullglob
+          IPKS=( release/${{ matrix.arch }}/*.ipk )
+          
+          cat << EOF > release/${{ matrix.arch }}/PKG-INFO
+          Metadata-Version: 2.1
+          Name: ${{ env.ARCHIVE_NAME }}
+          Version: $BRANCH
+          Author: $GITHUB_ACTOR
+          Home-page: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY
+          Download-URL: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          Summary: All packages from feed $FEEDNAME
+          Platform: ${{ matrix.arch }}
 
-      # 6️⃣ Compile only helloworld package (correct path)
-      - name: Compile Helloworld package
-        run: |
-          cd openwrt
-          # 确认包路径
-          make package/feeds/helloworld/helloworld/compile V=s
+          Packages for ImmortalWrt $BRANCH running on ${{ matrix.arch }}, built from $PRNUMBER
+          at commit $HEAD_ID, against $BRANCH at commit $BASE_ID.
 
-      # 7️⃣ Prepare artifact with unique name
-      - name: Prepare artifact
-        run: |
-          cd openwrt
-          mkdir -p ../artifact/package
-          cp -rf ./bin/packages/x86_64/*/helloworld/*.ipk ../artifact/package/ || true
-          # 自动生成 artifact 名称
-          echo "ARTIFACT_NAME=helloworld-$(date +'%Y%m%d%H%M')-run${GITHUB_RUN_ID}" >> $GITHUB_ENV
+          Package count: ${#IPKS[@]}
+          Package size summary:
+          EOF
+          
+          for f in "${IPKS[@]}"; do
+            du -sh "$f" >> release/${{ matrix.arch }}/PKG-INFO
+          done
 
-      # 8️⃣ Upload artifact
-      - name: Upload Helloworld package
+      - name: Upload built packages
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: ./artifact/package/
+          name: ${{ env.ARCHIVE_NAME }}-packages
+          path: release/${{ matrix.arch }}/
